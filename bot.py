@@ -1,15 +1,16 @@
 import logging
 import os
-from typing import Optional
-from dotenv import load_dotenv
+from typing import Dict, List, Optional
+import asyncio
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from dotenv import load_dotenv
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, ChatAction
 from telegram.ext import (
     Application,
-    CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 import yt_dlp
@@ -29,8 +30,8 @@ YDL_OPTIONS = {
     "no_warnings": True,
 }
 
-# Store user music data
-user_data = {}
+user_data: Dict[int, Dict[str, any]] = {}
+groups: Dict[int, Dict[str, any]] = {}
 
 
 def get_audio_info(url: str) -> Optional[dict]:
@@ -38,208 +39,310 @@ def get_audio_info(url: str) -> Optional[dict]:
     try:
         with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
             info = ydl.extract_info(url, download=False)
+            if not info:
+                return None
             return {
-                "url": info["url"],
                 "title": info.get("title", "Unknown Track"),
+                "url": info.get("webpage_url") or url,
                 "duration": info.get("duration", 0),
-                "thumbnail": info.get("thumbnail", None),
+                "thumbnail": info.get("thumbnail"),
+                "uploader": info.get("uploader", "Unknown"),
             }
     except Exception as e:
-        logger.exception("Failed to fetch audio: %s", e)
+        logger.exception("Failed to fetch YouTube info: %s", e)
         return None
 
 
+def get_user_data(user_id: int) -> Dict:
+    """Get or create user data"""
+    if user_id not in user_data:
+        user_data[user_id] = {
+            "queue": [],
+            "current": None,
+            "playing": False,
+        }
+    return user_data[user_id]
+
+
+def get_group_data(group_id: int) -> Dict:
+    """Get or create group data"""
+    if group_id not in groups:
+        groups[group_id] = {
+            "queue": [],
+            "current": None,
+            "playing": False,
+            "dj": None,
+        }
+    return groups[group_id]
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Start command"""
+    """Start command with inline menu"""
     keyboard = [
-        [InlineKeyboardButton("🎵 Play Song", callback_data="play")],
-        [InlineKeyboardButton("📋 Queue", callback_data="queue")],
-        [InlineKeyboardButton("⏸ Help", callback_data="help")],
+        [InlineKeyboardButton("🎵 Play Song", callback_data="play_song")],
+        [InlineKeyboardButton("📋 My Queue", callback_data="my_queue")],
+        [InlineKeyboardButton("❓ Help", callback_data="show_help")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
-        "🎵 Welcome to Music Bot!\n\n"
-        "Send me a YouTube URL to play music.\n"
-        "or use /play <url> command.",
-        reply_markup=reply_markup,
+    welcome_text = (
+        "🎵 <b>Welcome to Music Bot!</b>\n\n"
+        "Send me a YouTube link and I'll add it to your queue.\n\n"
+        "<b>Quick Commands:</b>\n"
+        "• /play &lt;url&gt; - Add song\n"
+        "• /queue - View queue\n"
+        "• /clear - Clear queue\n"
+        "• /help - Full help\n\n"
+        "<i>Works in groups and personal chats!</i>"
     )
+    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="HTML")
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show help"""
+    help_text = (
+        "🎵 <b>Music Bot - Full Guide</b>\n\n"
+        "<b>Commands:</b>\n"
+        "/start - Start menu\n"
+        "/play &lt;URL&gt; - Add YouTube song\n"
+        "/queue - Show your queue\n"
+        "/clear - Clear your queue\n"
+        "/help - This message\n\n"
+        "<b>How to Use:</b>\n"
+        "1️⃣ Send a YouTube URL directly\n"
+        "2️⃣ Or use /play &lt;YouTube URL&gt;\n"
+        "3️⃣ Check /queue\n"
+        "4️⃣ Use buttons for quick actions\n\n"
+        "<b>Features:</b>\n"
+        "✅ YouTube song queue\n"
+        "✅ Works in groups\n"
+        "✅ Personal queues\n"
+        "✅ Song info (title, duration, uploader)\n\n"
+        "<b>Get YouTube Link:</b>\n"
+        "Just copy any YouTube video URL and send it!"
+    )
+    await update.message.reply_text(help_text, parse_mode="HTML")
 
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Play command with URL"""
+    """Play command - add song by URL"""
     if not context.args:
-        await update.message.reply_text("Usage: /play <YouTube URL>")
+        await update.message.reply_text(
+            "❌ <b>Usage:</b> /play &lt;YouTube URL&gt;",
+            parse_mode="HTML"
+        )
         return
 
     url = context.args[0]
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
-    await update.message.reply_text("🔍 Fetching song info...")
+    # Show loading status
+    await update.message.chat.send_action(ChatAction.TYPING)
+    await update.message.reply_text("🔍 <b>Fetching song info...</b>", parse_mode="HTML")
 
-    audio_info = get_audio_info(url)
-    if not audio_info:
-        await update.message.reply_text("❌ Could not fetch song. Check the URL.")
+    # Fetch audio info
+    song = get_audio_info(url)
+    if not song:
+        await update.message.reply_text(
+            "❌ <b>Could not fetch this song.</b>\n"
+            "Make sure it's a valid YouTube URL.",
+            parse_mode="HTML"
+        )
         return
 
-    # Store in user queue
-    if user_id not in user_data:
-        user_data[user_id] = {"queue": []}
+    # Add to user's queue
+    data = get_user_data(user_id)
+    data["queue"].append(song)
+    queue_pos = len(data["queue"])
 
-    user_data[user_id]["queue"].append(audio_info)
-
+    # Prepare response with buttons
     keyboard = [
-        [InlineKeyboardButton("⬇️ Download", callback_data=f"download_{len(user_data[user_id]['queue']) - 1}")],
-        [InlineKeyboardButton("📋 Queue", callback_data="show_queue")],
+        [InlineKeyboardButton("📋 View Queue", callback_data="my_queue")],
+        [InlineKeyboardButton("🗑️ Clear Queue", callback_data="clear_all")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
-        f"✅ Added to queue:\n\n"
-        f"<b>{audio_info['title']}</b>\n"
-        f"Duration: {audio_info['duration']//60}:{audio_info['duration']%60:02d}",
-        reply_markup=reply_markup,
-        parse_mode="HTML",
+    response = (
+        f"✅ <b>Song Added to Queue!</b>\n\n"
+        f"<b>Title:</b> {song['title']}\n"
+        f"<b>Duration:</b> {song['duration']//60}:{song['duration']%60:02d}\n"
+        f"<b>Uploader:</b> {song['uploader']}\n"
+        f"<b>Position in Queue:</b> #{queue_pos}"
     )
+    await update.message.reply_text(response, reply_markup=reply_markup, parse_mode="HTML")
 
 
-async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle URL from message"""
-    url = update.message.text
+async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle direct URL messages"""
+    text = update.message.text.strip()
+    
+    # Check if it's a URL
+    if not any(text.startswith(prefix) for prefix in ["http://", "https://", "www.", "youtube.com", "youtu.be"]):
+        return
+
     user_id = update.effective_user.id
+    await update.message.chat.send_action(ChatAction.TYPING)
 
-    if not url.startswith(("http://", "https://", "www.")):
+    # Fetch audio info
+    song = get_audio_info(text)
+    if not song:
+        await update.message.reply_text(
+            "❌ <b>Could not fetch this song.</b>\n"
+            "Make sure it's a valid YouTube URL.",
+            parse_mode="HTML"
+        )
         return
 
-    await update.message.reply_text("🔍 Fetching song info...")
+    # Add to queue
+    data = get_user_data(user_id)
+    data["queue"].append(song)
+    queue_pos = len(data["queue"])
 
-    audio_info = get_audio_info(url)
-    if not audio_info:
-        await update.message.reply_text("❌ Could not fetch song. Try another URL.")
-        return
-
-    if user_id not in user_data:
-        user_data[user_id] = {"queue": []}
-
-    user_data[user_id]["queue"].append(audio_info)
-
+    # Prepare response
     keyboard = [
-        [InlineKeyboardButton("⬇️ Download MP3", callback_data=f"download_{len(user_data[user_id]['queue']) - 1}")],
-        [InlineKeyboardButton("📋 My Queue", callback_data="show_queue")],
+        [InlineKeyboardButton("📋 View Queue", callback_data="my_queue")],
+        [InlineKeyboardButton("🗑️ Clear Queue", callback_data="clear_all")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    response = (
+        f"✅ <b>Song Added!</b>\n\n"
+        f"🎵 <b>{song['title']}</b>\n"
+        f"⏱️ {song['duration']//60}:{song['duration']%60:02d}\n"
+        f"👤 {song['uploader']}\n"
+        f"📍 Position: #{queue_pos}"
+    )
+    await update.message.reply_text(response, reply_markup=reply_markup, parse_mode="HTML")
+
+
+async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show user's queue"""
+    user_id = update.effective_user.id
+    data = get_user_data(user_id)
+    queue = data["queue"]
+
+    if not queue:
+        await update.message.reply_text(
+            "📋 <b>Your queue is empty.</b>\n"
+            "Send a YouTube URL to add songs!",
+            parse_mode="HTML"
+        )
+        return
+
+    # Build queue message
+    lines = ["📋 <b>Your Queue:</b>\n"]
+    total_duration = 0
+    
+    for i, song in enumerate(queue, 1):
+        total_duration += song["duration"]
+        duration_str = f"{song['duration']//60}:{song['duration']%60:02d}"
+        lines.append(f"{i}. <b>{song['title']}</b>\n   ⏱️ {duration_str}\n")
+
+    total_min = total_duration // 60
+    total_sec = total_duration % 60
+    lines.append(f"\n<b>Total Duration:</b> {total_min}:{total_sec:02d}")
+    lines.append(f"<b>Songs:</b> {len(queue)}")
+
+    keyboard = [
+        [InlineKeyboardButton("🗑️ Clear Queue", callback_data="clear_all")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text("\n".join(lines), reply_markup=reply_markup, parse_mode="HTML")
+
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear user's queue"""
+    user_id = update.effective_user.id
+    data = get_user_data(user_id)
+    data["queue"] = []
+    data["current"] = None
+
     await update.message.reply_text(
-        f"✅ Added to queue:\n\n"
-        f"<b>{audio_info['title']}</b>\n"
-        f"Duration: {audio_info['duration']//60}:{audio_info['duration']%60:02d}",
-        reply_markup=reply_markup,
-        parse_mode="HTML",
+        "✅ <b>Queue cleared!</b>",
+        parse_mode="HTML"
     )
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle button presses"""
+    """Handle button callbacks"""
     query = update.callback_query
     await query.answer()
 
     user_id = update.effective_user.id
-    data = query.data
+    data = get_user_data(user_id)
+    action = query.data
 
-    if data == "help":
-        await query.edit_message_text(
+    if action == "show_help":
+        help_text = (
             "🎵 <b>Music Bot Help</b>\n\n"
-            "Commands:\n"
-            "/play <URL> - Play a YouTube song\n"
-            "/queue - Show your queue\n"
-            "/clear - Clear your queue\n\n"
-            "Or just send a YouTube URL directly!",
-            parse_mode="HTML",
+            "<b>Send a YouTube URL</b> → Auto add\n"
+            "<b>/play &lt;URL&gt;</b> → Add song\n"
+            "<b>/queue</b> → View songs\n"
+            "<b>/clear</b> → Remove all\n\n"
+            "Works in groups too! 🎉"
         )
+        await query.edit_message_text(help_text, parse_mode="HTML")
 
-    elif data == "show_queue":
-        if user_id not in user_data or not user_data[user_id]["queue"]:
-            await query.edit_message_text("📋 Your queue is empty.")
+    elif action == "my_queue":
+        queue = data["queue"]
+        if not queue:
+            await query.edit_message_text("📋 Queue is empty!")
             return
 
-        queue_text = "📋 <b>Your Queue:</b>\n\n"
-        for i, song in enumerate(user_data[user_id]["queue"], 1):
-            queue_text += f"{i}. {song['title']}\n"
+        lines = ["📋 <b>Your Queue:</b>\n"]
+        total_duration = 0
+        
+        for i, song in enumerate(queue, 1):
+            total_duration += song["duration"]
+            duration_str = f"{song['duration']//60}:{song['duration']%60:02d}"
+            lines.append(f"{i}. <b>{song['title']}</b> ({duration_str})\n")
 
-        await query.edit_message_text(queue_text, parse_mode="HTML")
+        total_min = total_duration // 60
+        total_sec = total_duration % 60
+        lines.append(f"\n<b>Total:</b> {total_min}:{total_sec:02d} | <b>Count:</b> {len(queue)}")
 
-    elif data.startswith("download_"):
-        idx = int(data.split("_")[1])
-        if user_id not in user_data or idx >= len(user_data[user_id]["queue"]):
-            await query.edit_message_text("❌ Song not found.")
-            return
+        await query.edit_message_text("\n".join(lines), parse_mode="HTML")
 
-        song = user_data[user_id]["queue"][idx]
+    elif action == "clear_all":
+        data["queue"] = []
+        data["current"] = None
+        await query.edit_message_text("✅ Queue cleared!")
+
+    elif action == "play_song":
         await query.edit_message_text(
-            f"⬇️ <b>Download Link:</b>\n\n"
-            f"<a href='{song['url']}'>Click here to download</a>\n\n"
-            f"Song: {song['title']}",
-            parse_mode="HTML",
+            "🎵 <b>Send a YouTube URL!</b>\n\n"
+            "Or use /play &lt;URL&gt;"
         )
 
 
-async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show queue"""
-    user_id = update.effective_user.id
-
-    if user_id not in user_data or not user_data[user_id]["queue"]:
-        await update.message.reply_text("📋 Your queue is empty.")
-        return
-
-    queue_text = "📋 <b>Your Queue:</b>\n\n"
-    for i, song in enumerate(user_data[user_id]["queue"], 1):
-        queue_text += f"{i}. {song['title']}\n"
-
-    await update.message.reply_text(queue_text, parse_mode="HTML")
-
-
-async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Clear queue"""
-    user_id = update.effective_user.id
-
-    if user_id in user_data:
-        user_data[user_id]["queue"] = []
-
-    await update.message.reply_text("✅ Queue cleared.")
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Help command"""
-    await update.message.reply_text(
-        "🎵 <b>Music Bot Commands</b>\n\n"
-        "/start - Start the bot\n"
-        "/play <URL> - Play a YouTube song\n"
-        "/queue - Show your queue\n"
-        "/clear - Clear your queue\n"
-        "/help - Show this help message\n\n"
-        "📌 Just send a YouTube URL and I'll fetch it for you!",
-        parse_mode="HTML",
-    )
-
-
-def main():
+def main() -> None:
     """Start the bot"""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing. Add it to your .env file.")
+        raise RuntimeError(
+            "❌ TELEGRAM_BOT_TOKEN is missing!\n"
+            "Add it to your .env file."
+        )
 
+    # Create application
     application = Application.builder().token(token).build()
 
-    # Handlers
+    # Add handlers
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("play", play_command))
     application.add_handler(CommandHandler("queue", queue_command))
     application.add_handler(CommandHandler("clear", clear_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+
+    # Message handler for URLs
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url_message))
+
+    # Button callbacks
     application.add_handler(CallbackQueryHandler(button_callback))
 
-    logger.info("Bot started...")
+    logger.info("🎵 Bot started successfully!")
     application.run_polling()
 
 
