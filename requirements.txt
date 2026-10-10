@@ -1,23 +1,23 @@
-# Core Bot Framework
-pyrogram>=2.0.106  # Telegram client library with voice chat support
-TgCalls>=0.9.0     # Real-time voice playback in group chats
+# Core Bot Framework - Pyrogram + Voice Chat
+pyrogram>=2.0.106
+TgCalls>=0.9.0
 
 # Audio Processing & Streaming
-yt-dlp>=2024.10.0  # YouTube metadata & audio extraction (updated for Python 3.13)
-pydub>=0.25.1      # Audio format conversion
-ffmpeg-python>=0.2.1  # FFmpeg wrapper for audio processing
+yt-dlp>=2024.10.0
+pydub>=0.25.1
+ffmpeg-python>=0.2.1
 
 # Database & Persistence
-sqlalchemy>=2.0.23  # ORM for database abstraction
-SQLAlchemy-Utils>=0.42.0  # Additional SQLAlchemy utilities
+sqlalchemy>=2.0.23
+SQLAlchemy-Utils>=0.42.0
 
 # Environment & Configuration
 python-dotenv>=1.0.0
-pydantic>=2.0.0     # Config validation & type safety
+pydantic>=2.0.0
 
 # Async/Concurrency
-asyncio-contextmanager>=1.0.0
+aiofiles>=23.0.0
 
 # Utilities
-requests>=2.31.0    # HTTP client
-aiohttp>=3.9.0      # Async HTTP client
+requests>=2.31.0
+aiohttp>=3.9.0
